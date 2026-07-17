@@ -2109,8 +2109,27 @@ function _generarLogica(G,activas){
       const diasUsados=_selectDays(diasElegibles,numCargasUnit);
       const n=diasUsados.length;
       if(!n) return;
-      // Cargo base (piso), ultimo dia = redondeo para cerrar el objetivo
-      const cargoBase=Math.floor(objetivo/n*100)/100;
+      // Generar montos aleatorios variados que sumen exactamente al objetivo
+      const minCargo=Math.max(50,Math.floor(objetivo/n*0.4));
+      const planSP=[];
+      let remSP=objetivo;
+      for(let pi=0;pi<n;pi++){
+        if(pi===n-1){
+          planSP.push(Math.max(0,Math.round(remSP*100)/100));
+        } else {
+          const left=n-pi;
+          const maxThis=Math.min(u.saldo,remSP-minCargo*(left-1));
+          if(maxThis<=minCargo){
+            planSP.push(minCargo);
+          } else {
+            const center=remSP/left;
+            const range=maxThis-minCargo;
+            const variation=(Math.random()-0.5)*range*0.6;
+            planSP.push(Math.round(Math.max(minCargo,Math.min(maxThis,center+variation))*100)/100);
+          }
+          remSP=Math.round((remSP-planSP[pi])*100)/100;
+        }
+      }
       let acum=0;
       diasUsados.forEach(({d,fecha},i)=>{
         const precio=getPrecioDia(G,d,u.combustible);
@@ -2121,7 +2140,7 @@ function _generarLogica(G,activas){
           cargo=Math.round((objetivo-acum)*100)/100;
           if(cargo<=0) return;
         } else {
-          cargo=cargoBase;
+          cargo=planSP[i];
         }
         cargo=Math.min(cargo,u.saldo);
         let litros=Math.floor(cargo/precio*10000)/10000;
