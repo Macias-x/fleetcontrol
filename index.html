@@ -2161,60 +2161,68 @@ function _generarLogica(G,activas){
       });
     });
 
-    // Multi-paso: agregar cargos en días no usados para cerrar exactamente el presupuesto
+    // Multi-paso: agregar cargos extras (incluso en días ya usados) hasta cerrar presupuesto exacto
     {
       let shortfall=Math.round((G.presupuesto-registros.reduce((a,c)=>a+c.cargo,0))*100)/100;
-      for(let pass=0; pass<20&&shortfall>0.01; pass++){
+      // Pre-computar días elegibles por unidad (se reusan en cada pasada)
+      const diasPorUnidad=activas.map(u=>{
+        const dp=[];
+        for(let d=1;d<=diasMes;d++){
+          const f=`${G.anio}-${String(G.mes).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+          if(unidadCargaEnDia(u,f)&&(!G.preciosPorDia||G.preciosDia[d])) dp.push({d,fecha:f});
+        }
+        return dp;
+      });
+      const _pushTicket=(u,d,fecha,precio,cargo)=>{
+        let litros=Math.floor(cargo/precio*10000)/10000;
+        for(let t=0;t<20;t++){if(Math.round(litros*precio*100)/100===cargo) break;litros=Math.round((litros+0.0001)*10000)/10000;}
+        const cargoFinal=Math.round(litros*precio*100)/100;
+        if(cargoFinal<=0) return 0;
+        const importeCents=Math.round(cargoFinal*100);
+        const iva=Math.round(importeCents*16/116)/100;
+        const sub=Math.round(importeCents-iva*100)/100;
+        const hMin=6*60+45,hMax=12*60+15;
+        const minT=Math.floor(hMin+Math.random()*(hMax-hMin));
+        const hh=String(Math.floor(minT/60)).padStart(2,'0');
+        const mm=String(minT%60).padStart(2,'0');
+        const ss=String(Math.floor(Math.random()*60)).padStart(2,'0');
+        registros.push({
+          tarjeta:u.tarjeta,tipoTarjeta:'CH',placa:u.placa,
+          fecha:`${fecha} ${hh}:${mm}:${ss}`,id:0,
+          cargo:cargoFinal,abono:0,
+          saldo:Math.max(0,Math.round((u.saldo-cargoFinal)*100)/100),
+          concepto:'Consumo',
+          estacion:gas?.estacionId||'',nombre:gas?.nombre||'',
+          domicilio:gas?.direccion||'',colonia:gas?.colonia||'',
+          ciudad:gas?.ciudad||'',estado:gas?.estado||'',rfc:gas?.rfc||'',
+          producto:u.combustible,precio,
+          kmIni:0,kmFin:0,litros,rendimiento:'0.00',
+          iva:'16%',consumo:'Normal',
+          usuario:'MUNICIPIO DE '+(gas?.municipio||'').toUpperCase(),
+          centroCosto:'SEGURIDAD PUBLICA',expediente:'0',tagFolio:'0',
+          importe:cargoFinal,sub,ivaNum:iva,
+          gasolineraId:gas?.id||1,combustible:u.combustible,
+        });
+        return cargoFinal;
+      };
+      for(let pass=0; pass<50&&shortfall>0.01; pass++){
         let progress=false;
         for(let uIdx=0; uIdx<activas.length&&shortfall>0.01; uIdx++){
           const u=activas[uIdx];
           if(!u.saldo) continue;
-          const usedDates=new Set(registros.filter(r=>r.placa===u.placa).map(r=>r.fecha.split(' ')[0]));
-          for(let d=1; d<=diasMes&&shortfall>0.01; d++){
-            const fecha=`${G.anio}-${String(G.mes).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-            if(usedDates.has(fecha)||!unidadCargaEnDia(u,fecha)) continue;
-            if(G.preciosPorDia&&!G.preciosDia[d]) continue;
+          for(const {d,fecha} of diasPorUnidad[uIdx]){
+            if(shortfall<=0.01) break;
             const precio=getPrecioDia(G,d,u.combustible);
             if(!precio) continue;
             const cargo=Math.min(u.saldo,Math.round(shortfall*100)/100);
             if(cargo<0.01) continue;
-            let litros=Math.floor(cargo/precio*10000)/10000;
-            for(let t=0;t<20;t++){if(Math.round(litros*precio*100)/100===cargo) break;litros=Math.round((litros+0.0001)*10000)/10000;}
-            const cargoFinal=Math.round(litros*precio*100)/100;
-            if(cargoFinal<=0) continue;
-            const importeCents=Math.round(cargoFinal*100);
-            const iva=Math.round(importeCents*16/116)/100;
-            const sub=Math.round(importeCents-iva*100)/100;
-            const hMin=6*60+45,hMax=12*60+15;
-            const minT=Math.floor(hMin+Math.random()*(hMax-hMin));
-            const hh=String(Math.floor(minT/60)).padStart(2,'0');
-            const mm=String(minT%60).padStart(2,'0');
-            const ss=String(Math.floor(Math.random()*60)).padStart(2,'0');
-            registros.push({
-              tarjeta:u.tarjeta,tipoTarjeta:'CH',placa:u.placa,
-              fecha:`${fecha} ${hh}:${mm}:${ss}`,id:0,
-              cargo:cargoFinal,abono:0,
-              saldo:Math.max(0,Math.round((u.saldo-cargoFinal)*100)/100),
-              concepto:'Consumo',
-              estacion:gas?.estacionId||'',nombre:gas?.nombre||'',
-              domicilio:gas?.direccion||'',colonia:gas?.colonia||'',
-              ciudad:gas?.ciudad||'',estado:gas?.estado||'',rfc:gas?.rfc||'',
-              producto:u.combustible,precio,
-              kmIni:0,kmFin:0,litros,rendimiento:'0.00',
-              iva:'16%',consumo:'Normal',
-              usuario:'MUNICIPIO DE '+(gas?.municipio||'').toUpperCase(),
-              centroCosto:'SEGURIDAD PUBLICA',expediente:'0',tagFolio:'0',
-              importe:cargoFinal,sub,ivaNum:iva,
-              gasolineraId:gas?.id||1,combustible:u.combustible,
-            });
-            usedDates.add(fecha);
-            shortfall=Math.round((shortfall-cargoFinal)*100)/100;
-            progress=true;
+            const cf=_pushTicket(u,d,fecha,precio,cargo);
+            if(cf>0){shortfall=Math.round((shortfall-cf)*100)/100;progress=true;}
           }
         }
         if(!progress) break;
       }
-      // Ajuste final: diferencia minima en ultimo ticket elegible
+      // Ajuste centavos: diferencia minima en ultimo ticket elegible
       if(Math.abs(shortfall)>=0.01){
         const lastByPlaca={};
         registros.forEach((r,i)=>{lastByPlaca[r.placa]=i;});
