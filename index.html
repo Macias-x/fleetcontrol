@@ -2073,17 +2073,47 @@ function _generarLogica(G,activas){
     });
 
   } else {
-    // ── SP: distribución proporcional al saldo ────────────────────────────
-    // ceil(objetivo/saldo) cargas => cada cargo siempre >= ~50% del saldo
+    // ── SP: una carga por día por unidad, montos variados, presupuesto exacto ──
     const totalSaldo=activas.reduce((a,u)=>a+(u.saldo||0),0);
     const gas=getGas(S.cap.municipio)||S.gasolineras[0];
 
+    // 1. Días elegibles por unidad
+    const diasPorUnidadSP=activas.map(u=>{
+      const dp=[];
+      for(let d=1;d<=diasMes;d++){
+        const f=`${G.anio}-${String(G.mes).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+        if(unidadCargaEnDia(u,f)&&(!G.preciosPorDia||G.preciosDia[d])) dp.push({d,fecha:f});
+      }
+      return dp;
+    });
+
+    // 2. Capacidad máxima: saldo × días (máx una carga por día)
+    const capacidades=activas.map((u,i)=>(u.saldo||0)*diasPorUnidadSP[i].length);
+
+    // 3. Objetivos iniciales proporcionales al saldo
     const objetivos=activas.map(u=>
       totalSaldo>0?Math.round(G.presupuesto*(u.saldo||0)/totalSaldo*100)/100:0
     );
-    // Ajuste global: sum(objetivos) = presupuesto exacto
+
+    // 4. Redistribuir exceso de unidades cuyo objetivo supera su capacidad
+    for(let iter=0;iter<50;iter++){
+      let excess=0, uncappedSaldo=0;
+      objetivos.forEach((obj,i)=>{
+        if(obj>capacidades[i]){excess=Math.round((excess+obj-capacidades[i])*100)/100;objetivos[i]=capacidades[i];}
+        else{uncappedSaldo+=activas[i].saldo||0;}
+      });
+      if(excess<0.01||uncappedSaldo<=0) break;
+      objetivos.forEach((obj,i)=>{
+        if(obj<capacidades[i]){
+          const add=Math.round(excess*(activas[i].saldo||0)/uncappedSaldo*100)/100;
+          objetivos[i]=Math.min(capacidades[i],Math.round((obj+add)*100)/100);
+        }
+      });
+    }
+
+    // 5. Ajuste final de centavos (sum exacta)
     {
-      const sumaObj=Math.round(objetivos.reduce((a,c)=>a+c,0)*100)/100;
+      const sumaObj=Math.round(objetivos.reduce((a,b)=>a+b,0)*100)/100;
       const diff=Math.round((G.presupuesto-sumaObj)*100)/100;
       if(Math.abs(diff)>=0.01){
         for(let i=objetivos.length-1;i>=0;i--){
@@ -2092,25 +2122,23 @@ function _generarLogica(G,activas){
       }
     }
 
+    // 6. Generar tickets: una carga por día, montos aleatorios variados
     activas.forEach((u,uIdx)=>{
       const objetivo=objetivos[uIdx];
       if(objetivo<=0||!u.saldo) return;
-      const diasElegibles=[];
-      for(let d=1;d<=diasMes;d++){
-        const fecha=`${G.anio}-${String(G.mes).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-        if(unidadCargaEnDia(u,fecha)&&(!G.preciosPorDia||G.preciosDia[d]))
-          diasElegibles.push({d,fecha});
-      }
-      if(!diasElegibles.length) return;
-      // ceil(objetivo/saldo) garantiza cargo minimo >= 50% del saldo
-      const numCargasUnit=(u.numCargas||0)>0
+      const diasEleg=diasPorUnidadSP[uIdx];
+      if(!diasEleg.length) return;
+
+      // Seleccionar días a usar
+      let numCargasUnit=(u.numCargas||0)>0
         ?u.numCargas
-        :Math.max(1,Math.ceil(objetivo/u.saldo));
-      const diasUsados=_selectDays(diasElegibles,numCargasUnit);
+        :(objetivo/diasEleg.length>=50?diasEleg.length:Math.max(1,Math.ceil(objetivo/50)));
+      const diasUsados=_selectDays(diasEleg,numCargasUnit);
       const n=diasUsados.length;
       if(!n) return;
-      // Generar montos aleatorios variados que sumen exactamente al objetivo
-      const minCargo=Math.max(50,Math.floor(objetivo/n*0.4));
+
+      // Plan de montos aleatorios garantizando min $50, max saldo, sum=objetivo
+      const minCargo=Math.max(50,Math.floor(objetivo/n*0.35));
       const planSP=[];
       let remSP=objetivo;
       for(let pi=0;pi<n;pi++){
@@ -2124,33 +2152,25 @@ function _generarLogica(G,activas){
           } else {
             const center=remSP/left;
             const range=maxThis-minCargo;
-            const variation=(Math.random()-0.5)*range*0.6;
+            const variation=(Math.random()-0.5)*range*0.7;
             planSP.push(Math.round(Math.max(minCargo,Math.min(maxThis,center+variation))*100)/100);
           }
           remSP=Math.round((remSP-planSP[pi])*100)/100;
         }
       }
+
       let acum=0;
       diasUsados.forEach(({d,fecha},i)=>{
         const precio=getPrecioDia(G,d,u.combustible);
         if(!precio) return;
         const esUltimo=i===n-1;
-        let cargo;
-        if(esUltimo){
-          cargo=Math.round((objetivo-acum)*100)/100;
-          if(cargo<=0) return;
-        } else {
-          cargo=planSP[i];
-        }
+        let cargo=esUltimo?Math.round((objetivo-acum)*100)/100:planSP[i];
+        if(cargo<=0) return;
         cargo=Math.min(cargo,u.saldo);
         let litros=Math.floor(cargo/precio*10000)/10000;
-        for(let t=0;t<20;t++){
-          if(Math.round(litros*precio*100)/100===cargo) break;
-          litros=Math.round((litros+0.0001)*10000)/10000;
-        }
+        for(let t=0;t<20;t++){if(Math.round(litros*precio*100)/100===cargo) break;litros=Math.round((litros+0.0001)*10000)/10000;}
         const cargoFinal=Math.round(litros*precio*100)/100;
         if(litros<=0||cargoFinal<=0) return;
-
         const importeCents=Math.round(cargoFinal*100);
         const iva=Math.round(importeCents*16/116)/100;
         const sub=Math.round(importeCents-iva*100)/100;
@@ -2180,75 +2200,16 @@ function _generarLogica(G,activas){
       });
     });
 
-    // Multi-paso: agregar cargos extras (incluso en días ya usados) hasta cerrar presupuesto exacto
+    // 7. Ajuste de centavos por redondeo de litros (diferencia mínima)
     {
-      let shortfall=Math.round((G.presupuesto-registros.reduce((a,c)=>a+c.cargo,0))*100)/100;
-      // Pre-computar días elegibles por unidad (se reusan en cada pasada)
-      const diasPorUnidad=activas.map(u=>{
-        const dp=[];
-        for(let d=1;d<=diasMes;d++){
-          const f=`${G.anio}-${String(G.mes).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-          if(unidadCargaEnDia(u,f)&&(!G.preciosPorDia||G.preciosDia[d])) dp.push({d,fecha:f});
-        }
-        return dp;
-      });
-      const _pushTicket=(u,d,fecha,precio,cargo)=>{
-        let litros=Math.floor(cargo/precio*10000)/10000;
-        for(let t=0;t<20;t++){if(Math.round(litros*precio*100)/100===cargo) break;litros=Math.round((litros+0.0001)*10000)/10000;}
-        const cargoFinal=Math.round(litros*precio*100)/100;
-        if(cargoFinal<=0) return 0;
-        const importeCents=Math.round(cargoFinal*100);
-        const iva=Math.round(importeCents*16/116)/100;
-        const sub=Math.round(importeCents-iva*100)/100;
-        const hMin=6*60+45,hMax=12*60+15;
-        const minT=Math.floor(hMin+Math.random()*(hMax-hMin));
-        const hh=String(Math.floor(minT/60)).padStart(2,'0');
-        const mm=String(minT%60).padStart(2,'0');
-        const ss=String(Math.floor(Math.random()*60)).padStart(2,'0');
-        registros.push({
-          tarjeta:u.tarjeta,tipoTarjeta:'CH',placa:u.placa,
-          fecha:`${fecha} ${hh}:${mm}:${ss}`,id:0,
-          cargo:cargoFinal,abono:0,
-          saldo:Math.max(0,Math.round((u.saldo-cargoFinal)*100)/100),
-          concepto:'Consumo',
-          estacion:gas?.estacionId||'',nombre:gas?.nombre||'',
-          domicilio:gas?.direccion||'',colonia:gas?.colonia||'',
-          ciudad:gas?.ciudad||'',estado:gas?.estado||'',rfc:gas?.rfc||'',
-          producto:u.combustible,precio,
-          kmIni:0,kmFin:0,litros,rendimiento:'0.00',
-          iva:'16%',consumo:'Normal',
-          usuario:'MUNICIPIO DE '+(gas?.municipio||'').toUpperCase(),
-          centroCosto:'SEGURIDAD PUBLICA',expediente:'0',tagFolio:'0',
-          importe:cargoFinal,sub,ivaNum:iva,
-          gasolineraId:gas?.id||1,combustible:u.combustible,
-        });
-        return cargoFinal;
-      };
-      for(let pass=0; pass<50&&shortfall>0.01; pass++){
-        let progress=false;
-        for(let uIdx=0; uIdx<activas.length&&shortfall>0.01; uIdx++){
-          const u=activas[uIdx];
-          if(!u.saldo) continue;
-          for(const {d,fecha} of diasPorUnidad[uIdx]){
-            if(shortfall<=0.01) break;
-            const precio=getPrecioDia(G,d,u.combustible);
-            if(!precio) continue;
-            const cargo=Math.min(u.saldo,Math.round(shortfall*100)/100);
-            if(cargo<0.01) continue;
-            const cf=_pushTicket(u,d,fecha,precio,cargo);
-            if(cf>0){shortfall=Math.round((shortfall-cf)*100)/100;progress=true;}
-          }
-        }
-        if(!progress) break;
-      }
-      // Ajuste centavos: diferencia minima en ultimo ticket elegible
-      if(Math.abs(shortfall)>=0.01){
+      const diffFinal=Math.round((G.presupuesto-registros.reduce((a,c)=>a+c.cargo,0))*100)/100;
+      if(Math.abs(diffFinal)>=0.01&&Math.abs(diffFinal)<2){
         const lastByPlaca={};
         registros.forEach((r,i)=>{lastByPlaca[r.placa]=i;});
         for(const idx of Object.values(lastByPlaca).reverse()){
           const r=registros[idx];
           const u=activas.find(u=>u.placa===r.placa);
-          const ncObj=Math.round((r.cargo+shortfall)*100)/100;
+          const ncObj=Math.round((r.cargo+diffFinal)*100)/100;
           if(ncObj<=0||(u&&ncObj>u.saldo+0.01)) continue;
           let lit=Math.floor(ncObj/r.precio*10000)/10000;
           for(let t=0;t<20;t++){if(Math.round(lit*r.precio*100)/100===ncObj) break;lit=Math.round((lit+0.0001)*10000)/10000;}
