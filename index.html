@@ -2148,7 +2148,8 @@ function _generarLogica(G,activas){
           const left=n-pi;
           const maxThis=Math.min(u.saldo,remSP-minCargo*(left-1));
           if(maxThis<=minCargo){
-            planSP.push(minCargo);
+            // No metas más de lo que queda dividido entre los días restantes (evita overshoot)
+            planSP.push(Math.max(0,Math.min(minCargo,Math.round(remSP/left*100)/100)));
           } else {
             const center=remSP/left;
             const range=maxThis-minCargo;
@@ -2166,7 +2167,8 @@ function _generarLogica(G,activas){
         const esUltimo=i===n-1;
         let cargo=esUltimo?Math.round((objetivo-acum)*100)/100:planSP[i];
         if(cargo<=0) return;
-        cargo=Math.min(cargo,u.saldo);
+        // Solo los cargos intermedios respetan el tope; el último cierra el objetivo exacto
+        if(!esUltimo) cargo=Math.min(cargo,u.saldo);
         let litros=Math.floor(cargo/precio*10000)/10000;
         for(let t=0;t<20;t++){if(Math.round(litros*precio*100)/100===cargo) break;litros=Math.round((litros+0.0001)*10000)/10000;}
         const cargoFinal=Math.round(litros*precio*100)/100;
